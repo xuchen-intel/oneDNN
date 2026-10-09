@@ -2487,7 +2487,6 @@ inline status_t check_blocking(const memory_desc_wrapper &output_d, int ic_idx) 
     return status::success;
 }
 
-// Repacks one block. get_val(oc_local, ic_local) returns the u3 input value.
 template <typename F>
 void repack_block(const memory_desc_wrapper &output_d, uint8_t *dst,
         int blksize_o, int blksize_i, int oc_block, int ic_block, F get_val) {
@@ -2522,7 +2521,6 @@ void repack_block(const memory_desc_wrapper &output_d, uint8_t *dst,
     }
 }
 
-// Block sizes along OC/IC (logical dim indices oc_idx/ic_idx).
 inline void get_blksizes(const memory_desc_wrapper &output_d, int oc_idx,
         int &blksize_o, int &blksize_i) {
     const auto &blk = output_d.blocking_desc();
@@ -2551,7 +2549,7 @@ struct simple_reorder_impl_t<SIMPLE_REORDER_TEMPL_CALL,
                                    : input_d.matches_tag(tag_o)
                                             && output_d.is_plain())))
             return status::invalid_arguments;
-        // Dims are [OC=0, IC=1].
+
         return u3_repack::check_blocking(output_d, 1);
     }
 
@@ -2575,7 +2573,6 @@ struct simple_reorder_impl_t<SIMPLE_REORDER_TEMPL_CALL,
         uint8_t *output_u8 = reinterpret_cast<uint8_t *>(output);
 
         parallel_nd(NB_OC, NB_IC, [&](int nb_oc, int nb_ic) {
-            // blk_off returns the block's base in elements; * 3/8 -> bytes.
             uint8_t *dst = output_u8
                     + (size_t)output_d.blk_off<false>(nb_oc, nb_ic) * 3 / 8;
             const int oc0 = nb_oc * blksize_o;
@@ -2593,9 +2590,6 @@ struct simple_reorder_impl_t<SIMPLE_REORDER_TEMPL_CALL,
     }
 };
 
-// Batched (leading 'a'/expert dim, e.g. GatherMatmul) variant of the u3
-// bit-plane repack above: each batch slice is an independent [OC,IC] u3 tensor
-// repacked exactly like the non-batched case.
 template <SIMPLE_REORDER_TEMPL_DECL>
 struct simple_reorder_impl_t<SIMPLE_REORDER_TEMPL_CALL,
         typename utils::enable_if<tag_i == format_tag::any
@@ -2610,7 +2604,7 @@ struct simple_reorder_impl_t<SIMPLE_REORDER_TEMPL_CALL,
                                    : input_d.matches_tag(tag_o)
                                             && output_d.is_plain())))
             return status::invalid_arguments;
-        // Dims are [batch=0, OC=1, IC=2] (shifted by one vs the _AB case).
+
         return u3_repack::check_blocking(output_d, 2);
     }
 

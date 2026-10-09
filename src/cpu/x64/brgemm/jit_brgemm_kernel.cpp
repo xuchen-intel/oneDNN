@@ -342,9 +342,6 @@ private:
 
         if (brg.with_src_dyn_quant) { used_vregs += 1; }
 
-        // u3 bit-plane extraction needs 2 extra temp regs (vmm_bit1/vmm_bit2):
-        // beyond the vmm_mask_low reserved above by with_src_dyn_quant (dyn-quant
-        // case), or standalone (non-dyn-quant "immediate" case, gemm_microkernel).
         if (brg.dt_b == data_type::u3) {
             used_vregs += 2;
         }
@@ -669,7 +666,6 @@ dim_t jit_brgemm_kernel_t<Wmm>::B_offset(
         const dim_t num = brg.typesize_B
                 * (rdb0 * brg.ld_step * brg.LDB
                         + brg.ld_step * ld * brg.ld_block);
-        // u3 is tightly packed (8 values / 3 bytes); byte offset = elems * 3 / 8.
         if (brg.dt_b == data_type::u3) return num * 3 / 8;
         return num / typesize_scale;
     }
@@ -3449,18 +3445,10 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel_dyn_quant(dim_t bd_block2,
                 uni_vpsrld(vmm_load, vmm_load, 6 - 2 * idx);
                 uni_vandps(vmm_load, vmm_load, vmm_mask_low);
             } else if (brg.dt_b == data_type::u3) {
-                // Bit-plane layout: 3 registers hold bit0/bit1/bit2 of each
-                // value; reconstruct value = bit2*4 + bit1*2 + bit0. Pack idx
-                // (0..7) packed MSB-first within each byte (bit at 7-idx).
                 auto vmm_bit1 = Vmm(isa_num_vregs(brg.isa_impl) - 2);
                 auto vmm_bit2 = Vmm(isa_num_vregs(brg.isa_impl) - 3);
                 const int idx = (rd % 32) / 4;
                 const int sh = 7 - idx;
-                // The u3 dyn-quant reorder always writes groups of 8 OC: 3
-                // bit-planes x 32 bytes (96 bytes), independent of ISA. A
-                // ymm load is one plane of one group; a zmm (16 OC) covers 2
-                // consecutive groups, so each 64-byte plane is assembled from
-                // its two 32-byte halves (B_offset(ld) = 2*ld groups).
                 constexpr int grp_plane_bytes = 32;
                 constexpr int grp_bytes = 3 * grp_plane_bytes;
                 auto load_plane = [&](const Vmm &vmm, int r) {
@@ -4029,20 +4017,6 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel(dim_t bd_block2,
                             }
                             uni_vcvtdq2ps(vmm_load, vmm_load);
                         } else if (brg.dt_b == data_type::u3) {
-                            // Bit-plane layout (mirrors gemm_microkernel_dyn_quant's u3
-                            // technique): 3 consecutive n_lanes-dword-wide byte-planes
-                            // hold bit0/bit1/bit2 for n_lanes consecutive OC values
-                            // (n_lanes = number of dword lanes in Vmm). Reconstruct
-                            // value = bit2*4 + bit1*2 + bit0. Pack idx (rd%8) MSB-first
-                            // (bit at 7-idx within each plane's byte). Each per-lane
-                            // bit is isolated via shift-left-to-bit31-then-logical-
-                            // shift-right-by-31 (same trick u4/s4 use for nibbles
-                            // above), so no separate AND-mask register is needed.
-                            // vmm_bit1/vmm_bit2 must be the 2 regs reserved by the u3
-                            // `used_vregs += 2` in get_max_effective_vregs, i.e. the
-                            // lowest 2 above max_effective_vregs. Fixed top indices
-                            // (isa_num_vregs-2/-3) alias accm() whenever the scalar
-                            // zero-point reg is not reserved (zp absent or per-OC).
                             const int n_lanes = vreg_traits_t<Vmm>::vlen / 4;
                             auto vmm_bit1 = Vmm(max_effective_vregs);
                             auto vmm_bit2 = Vmm(max_effective_vregs + 1);

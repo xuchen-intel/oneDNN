@@ -454,7 +454,6 @@ status_t brgemm_inner_product_fwd_t<isa>::execute_forward(
                         }
                     }();
                     const bool is_u3 = jbgp.orig_wei_dt == data_type::u3;
-                    // u3 is tightly packed: byte offset = elems * 3 / 8.
                     auto w_off = is_u3 ? wei_offset
                                     / types::data_type_size(jbgp.wei_dt) * 3 / 8
                                        : wei_offset
@@ -557,7 +556,6 @@ status_t brgemm_inner_product_fwd_t<isa>::execute_forward(
 
                     addr_batch[b].ptr.B = decomp_buf;
                 } else if (jbgp.wei_dt == data_type::u3) {
-                    // u3 tight packing: byte offset = elems * 3 / 8.
                     addr_batch[b].ptr.B = weights + wei_offset * 3 / 8;
                 } else {
                     int typesize_scale = [&] {
@@ -664,7 +662,6 @@ status_t brgemm_inner_product_fwd_t<isa>::execute_forward(
                     }
                 }();
                 const bool is_u3 = jbgp.orig_wei_dt == data_type::u3;
-                // u3 is tightly packed: byte offset = elems * 3 / 8.
                 auto w_off = is_u3
                         ? wei_offset / types::data_type_size(jbgp.wei_dt) * 3
                                 / 8
@@ -700,8 +697,6 @@ status_t brgemm_inner_product_fwd_t<isa>::execute_forward(
                 auto wei_scales_ptr = wei_scales
                         + wei_scales_oc_stride * oc * wei_scales_dt_size;
 
-                // u3 decodes whole 8-value groups; the IC tail's padding is
-                // zero-filled by the reorder, so round the tail up.
                 const auto ic_tail_size = is_u3
                         ? div_up(jbgp.ic - (ic + ic_block * jbgp.ic_block),
                                 ic_internal_block)

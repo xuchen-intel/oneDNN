@@ -17,9 +17,6 @@
 #include "cpu/x64/jit_brgemm_inner_product_utils.hpp"
 #include "common/math_utils.hpp"
 
-#include <cstdio>
-#include <cstdlib>
-
 #include "cpu/x64/brgemm/brgemm.hpp"
 #include "cpu/x64/brgemm/brgemm_utils.hpp"
 
@@ -335,8 +332,6 @@ jit_brgemm_ip_conf_t::get_desired_weights_tag() const {
             }
         }
     } else if (jbgp.weights_decompression && jbgp.orig_wei_dt == u3) {
-        // u3 uses the same blocked tags as u2 (dyn-quant VNNI path). The u3
-        // reorder repacks into 3 bit-planes within the (tight) u3-sized buffer.
         if (jbgp.with_src_dynamic_quant) {
             return {{64,
                             pick(n_sp_dims, OI16i64o2i, OIw16i64o2i,
@@ -1651,16 +1646,9 @@ status_t jit_brgemm_ip_conf_t::init_conf_base(cpu_isa_t isa,
             size_t rd_unroll = jbgp.src_quant_group_size;
             jbgp.src_sum_group_size = nstl::min(rd_unroll, min_group_size);
 
-            // u3's bit-plane dyn-quant microkernel packs IC in fixed 32-wide blocks
-            // (pack-number 8 x rd_step 4), applying one dyn-quant rescale per block. The
-            // EFFECTIVE rescale granularity is src_sum_group_size (the min of the src
-            // dyn-quant group size and any weight-level decompression group size, e.g. from
-            // a grouped weights-decompression scale/zero-point) -- not src_quant_group_size
-            // in isolation. A small weight-decompression group size (e.g. 16) can drag
-            // src_sum_group_size below 32 even when src_quant_group_size itself is 32,
-            // causing a single 32-wide block to straddle two rescale groups and silently
-            // corrupt half of every block's results. Reject cleanly instead of computing
-            // wrong results.
+            // U3 requires src_sum_group_size to be a multiple of 32 because the 32 bits for vnni dot product
+            // are corresponding to 32 elements in IC dimension, which is because u3 repack assures
+            // each of the 3 bits of an element be loaded to 3 different vector registers.
             if (jbgp.wei_dt == u3 && jbgp.src_sum_group_size % 32)
                 return status::unimplemented;
 

@@ -291,8 +291,6 @@ int calculate_max_bcast_block(brgemm_desc_t *brg, const int adj_ld_block2) {
             && !brg->with_src_dyn_quant)
         microkernel_max_reg_count -= 1;
     if (brg->with_src_dyn_quant) microkernel_max_reg_count -= 1;
-    // u3 bit-plane decode temps (vmm_bit1/vmm_bit2), see
-    // get_max_effective_vregs() in jit_brgemm_kernel.cpp.
     if (brg->dt_b == data_type::u3) microkernel_max_reg_count -= 2;
 
     auto microkernel_max_bcast_block
@@ -1015,17 +1013,10 @@ status_t brgemm_blocking(brgemm_desc_t *brg) {
             brg->ld_step = 16;
             brg->rd_step = 4;
         } else if (one_of(brg->dt_b, data_type::u3)) {
-            // u3 bit-plane layout: pack-number 8 (vs u2's 4) -> ld_step = 8 * rd_step.
             brg->ld_step = 32;
             brg->rd_step = 4;
         }
     } else if (brg->dt_b == data_type::u3) {
-        // Non-dyn-quant (immediate/prepack) u3: no VNNI dot-product instruction is
-        // used here (plain float FMA, like u2/u4's own non-dyn-quant path), so
-        // rd_step=1 (scalar accumulation, mirroring has_no_vnni_compute_instruction's
-        // effect for u2/u4/u8 above). u3's native tight packing groups 8 values into
-        // 3 bytes (not u2's 4 values/byte), so ld_step=8 here (vs u2's ld_step=4,
-        // inherited above from data_type_vnni_granularity(u2)==4).
         brg->ld_step = 8;
         brg->rd_step = 1;
     }
