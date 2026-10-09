@@ -2468,25 +2468,8 @@ struct simple_reorder_impl_t<SIMPLE_REORDER_TEMPL_CALL,
     }
 };
 
-// U3 bit-plane repack. Input is tight LSB-packed u3 (8 values / 3 bytes). The
-// output keeps the tight u3 size but splits each value's 3 bits into 3
-// bit-planes, so the brgemm kernels reconstruct value = bit2*4 + bit1*2 + bit0
-// with plain shifts. Within each [blksize_o x blksize_i] block, the layout
-// depends on the consuming kernel, identified by the block signature:
-//  - inner_blks [16, X, 2] (OI16i*o2i / aBC16c*b2c): src-dynamic-quant VNNI
-//    (gemm_microkernel_dyn_quant). ISA-independent groups of 8 OC x 32 IC:
-//    group (ic/32, oc/8) at ((ic/32)*(blksize_o/8) + oc/8)*96 bytes; bit-plane
-//    r at +r*32; OC d at +d*4; byte ic%4; pack idx (ic%32)/4 stored MSB-first
-//    (bit 7-pack). A zmm kernel assembles each plane from 2 consecutive groups.
-//  - otherwise: non-dyn-quant (gemm_microkernel immediate / prepack kernel).
-//    Groups of n_lanes OC x 8 IC: group (ic/8, oc/n_lanes) at
-//    ((ic/8)*(blksize_o/n_lanes) + oc/n_lanes)*3*n_lanes bytes; bit-plane r at
-//    +r*n_lanes; OC lane at +lane; pack idx ic%8 stored MSB-first. n_lanes is
-//    the kernel's dword-lane count: 16 for the avx512 OI16i*o4i / aBC16c*b4c
-//    tags, 8 for the avx2 ones (OI8i*o2i / aBC8c*b2c).
 namespace u3_repack {
 
-// Read a tight LSB-packed u3 value (matches ov::element::iterator<u3>).
 inline uint8_t get_u3(const uint8_t *base, size_t idx) {
     const size_t bit = idx * 3;
     const size_t byte = bit >> 3;
@@ -2509,7 +2492,7 @@ template <typename F>
 void repack_block(const memory_desc_wrapper &output_d, uint8_t *dst,
         int blksize_o, int blksize_i, int oc_block, int ic_block, F get_val) {
     const auto &blk = output_d.blocking_desc();
-    const bool dyn_quant = blk.inner_blks[0] == 16 && blk.inner_blks[2] == 2;
+    const bool dyn_quant = blk.inner_blks[2] == 2;
     for (size_t b = 0; b < (size_t)blksize_o * blksize_i * 3 / 8; b++)
         dst[b] = 0;
     for (int oc_local = 0; oc_local < oc_block; oc_local++) {

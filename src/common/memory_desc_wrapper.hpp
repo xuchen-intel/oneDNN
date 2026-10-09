@@ -226,14 +226,6 @@ struct memory_desc_wrapper : public c_compatible {
         return 1;
     }
 
-    /** Number of bytes needed to store `nelems` packed elements. Handles
-     * sub-byte types whose packing is not a power-of-two-per-byte (u3: 8
-     * values in 3 bytes). For all other types this matches
-     * div_up(nelems * data_type_size, sub_byte_data_type_multiplier). */
-    size_t packed_bytes(size_t nelems) const {
-        return types::elements_to_bytes(data_type(), nelems);
-    }
-
     /** return the size of data type of additional buffer */
     size_t additional_buffer_data_size(uint64_t flag_select) const {
         using namespace memory_extra_flags;
@@ -378,9 +370,7 @@ struct memory_desc_wrapper : public c_compatible {
                 max_size = static_cast<size_t>(blk_size());
             }
 
-            // `div_up` guarantees a spot in memory for odd number of half-byte
-            // elements. Crucial case is `1` when simple division returns 0.
-            size_t data_size = packed_bytes(max_size);
+            size_t data_size = types::elements_to_bytes(data_type(), max_size);
             if (is_additional_buffer()) {
                 // The additional buffers, typically of data type int32_t, float
                 // are stored at the end of data. Pad the data, so that the
@@ -491,7 +481,7 @@ struct memory_desc_wrapper : public c_compatible {
         if (utils::one_of(format_kind(), format_kind::undef, format_kind::any))
             return false;
         if (has_runtime_dims_or_strides() || has_broadcast()) return false;
-        return packed_bytes(nelems(with_padding))
+        return types::elements_to_bytes(data_type(), nelems(with_padding))
                 == size(0, /* include_additional_size = */ false);
     }
 

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2025 Intel Corporation
+* Copyright 2026 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -29,10 +29,6 @@ const impl_list_map_t &regular_u3_impl_list_map() {
             REG_SR(u3, any, u3, OI16i32o2i, fmt_order_keep)
             REG_SR(u3, any, u3, OI16i48o2i, fmt_order_keep)
             REG_SR(u3, any, u3, OI16i64o2i, fmt_order_keep)
-            REG_SR(u3, any, u3, OI8i8o2i, fmt_order_keep)
-            REG_SR(u3, any, u3, OI8i16o2i, fmt_order_keep)
-            REG_SR(u3, any, u3, OI8i24o2i, fmt_order_keep)
-            REG_SR(u3, any, u3, OI8i32o2i, fmt_order_keep)
             REG_SR(u3, any, u3, OI4i8o4i, fmt_order_keep)
             REG_SR(u3, any, u3, OI4i16o4i, fmt_order_keep)
             REG_SR(u3, any, u3, OI4i24o4i, fmt_order_keep)
@@ -41,16 +37,14 @@ const impl_list_map_t &regular_u3_impl_list_map() {
             REG_SR(u3, any, u3, OI16i32o4i, fmt_order_keep)
             REG_SR(u3, any, u3, OI16i48o4i, fmt_order_keep)
             REG_SR(u3, any, u3, OI16i64o4i, fmt_order_keep)
-            // Batched (leading expert dim) tags, e.g. GatherMatmul weights.
-            REG_SR(u3, any, u3, aBC8c8b2c, fmt_order_keep)
-            REG_SR(u3, any, u3, aBC8c16b2c, fmt_order_keep)
-            REG_SR(u3, any, u3, aBC8c24b2c, fmt_order_keep)
-            REG_SR(u3, any, u3, aBC8c32b2c, fmt_order_keep)
-            REG_SR(u3, any, u3, aBC8c64b2c, fmt_order_keep)
             REG_SR(u3, any, u3, aBC16c16b2c, fmt_order_keep)
             REG_SR(u3, any, u3, aBC16c32b2c, fmt_order_keep)
             REG_SR(u3, any, u3, aBC16c48b2c, fmt_order_keep)
             REG_SR(u3, any, u3, aBC16c64b2c, fmt_order_keep)
+            REG_SR(u3, any, u3, aBC4c8b4c, fmt_order_keep)
+            REG_SR(u3, any, u3, aBC4c16b4c, fmt_order_keep)
+            REG_SR(u3, any, u3, aBC4c24b4c, fmt_order_keep)
+            REG_SR(u3, any, u3, aBC4c32b4c, fmt_order_keep)
             REG_SR(u3, any, u3, aBC16c16b4c, fmt_order_keep)
             REG_SR(u3, any, u3, aBC16c32b4c, fmt_order_keep)
             REG_SR(u3, any, u3, aBC16c48b4c, fmt_order_keep)

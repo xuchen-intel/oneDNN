@@ -222,8 +222,6 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map()
             CPU_INSTANCE_AVX512(brgemm_inner_product_fwd_t, avx512_core_bf16)
             nullptr,
         }},
-        // VNNI instance serves the BF16 source dynamic-quantization path, as for
-        // {bf16, u8/u4, *} above.
         {{forward, bf16, u3, f32}, {
             CPU_INSTANCE_AMX(brgemm_inner_product_fwd_t, avx512_core_amx)
             CPU_INSTANCE_AVX512(brgemm_inner_product_fwd_t, avx512_core_vnni)

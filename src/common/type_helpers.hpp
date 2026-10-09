@@ -129,7 +129,6 @@ inline size_t elements_to_bytes(data_type_t data_type, size_t count) {
         case s4:
         case u4: return (count + 1) >> 1;
         case u2: return (count + 3) >> 2;
-        // U3 is tightly packed: 8 values in 3 bytes (straddles byte boundaries).
         case u3: return (count * 3 + 7) >> 3;
         default: return data_type_size(data_type) * count;
     }
