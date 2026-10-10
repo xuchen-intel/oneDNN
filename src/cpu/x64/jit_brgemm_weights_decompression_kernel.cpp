@@ -63,16 +63,6 @@ void jit_brgemm_weights_decompression_kernel_t<isa>::init_decomp_params(
                     uni_vbroadcastss(vmm_params(ocb), xmm_params);
                     break;
                 }
-                case data_type::u3: {
-                    auto xmm_params = Xmm(vmm_params(ocb).getIdx());
-                    auto reg_tmp_32 = Reg32(reg_tmp.getIdx());
-                    movzx(reg_tmp_32, ptr[reg_params]);
-                    and_(reg_tmp_32, 0x7);
-                    uni_vmovq(xmm_params, reg_tmp);
-                    uni_vcvtdq2ps(xmm_params, xmm_params);
-                    uni_vbroadcastss(vmm_params(ocb), xmm_params);
-                    break;
-                }
                 case data_type::e8m0: {
                     auto xmm_params = Xmm(vmm_params(ocb).getIdx());
                     auto reg_tmp_32 = Reg32(reg_tmp.getIdx());

@@ -3543,8 +3543,6 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel_dyn_quant(dim_t bd_block2,
             movzx(reg_ptr_32, ptr[reg_local_wei_zp]);
             if (brg.wei_decomp_zero_points_dt == data_type::u2) {
                 and_(reg_ptr_32, 0x3);
-            } else if (brg.wei_decomp_zero_points_dt == data_type::u3) {
-                and_(reg_ptr_32, 0x7);
             }
             uni_vmovq(xmm_zp, reg_ptr);
             uni_vbroadcastss(vmm_zp, xmm_zp);
@@ -3850,16 +3848,6 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel(dim_t bd_block2,
                                 auto reg_ptr_32 = Reg32(reg_ptr.getIdx());
                                 movzx(reg_ptr_32, addr);
                                 and_(reg_ptr_32, 0x3);
-                                uni_vmovq(xmm_zp, reg_ptr);
-                                uni_vcvtdq2ps(xmm_zp, xmm_zp);
-                                uni_vbroadcastss(vmm_zp, xmm_zp);
-                                break;
-                            }
-                            case data_type::u3: {
-                                auto xmm_zp = Xmm(vmm_zp.getIdx());
-                                auto reg_ptr_32 = Reg32(reg_ptr.getIdx());
-                                movzx(reg_ptr_32, addr);
-                                and_(reg_ptr_32, 0x7);
                                 uni_vmovq(xmm_zp, reg_ptr);
                                 uni_vcvtdq2ps(xmm_zp, xmm_zp);
                                 uni_vbroadcastss(vmm_zp, xmm_zp);

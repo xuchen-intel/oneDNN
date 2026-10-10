@@ -1605,7 +1605,7 @@ status_t jit_brgemm_ip_conf_t::init_conf_base(cpu_isa_t isa,
 
             jbgp.wei_decomp_zero_points_dt
                     = attr.zero_points_.get_data_type(DNNL_ARG_WEIGHTS);
-            if (!one_of(jbgp.wei_decomp_zero_points_dt, f32, u8, u2, u3))
+            if (!one_of(jbgp.wei_decomp_zero_points_dt, f32, u8, u2))
                 return status::unimplemented;
         }
 
@@ -1636,7 +1636,7 @@ status_t jit_brgemm_ip_conf_t::init_conf_base(cpu_isa_t isa,
         if (jbgp.with_src_dynamic_quant) {
             if (!(one_of(jbgp.wei_dt, u2, u3, u4, u8)
                         && one_of(jbgp.wei_decomp_scales_dt, f32)
-                        && one_of(jbgp.wei_decomp_zero_points_dt, u2, u3, u8,
+                        && one_of(jbgp.wei_decomp_zero_points_dt, u2, u8,
                                 data_type::undef)))
                 return status::unimplemented;
 
