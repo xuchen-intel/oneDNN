@@ -683,6 +683,15 @@ struct brgemm_desc_t {
 
     bool is_xf16() const noexcept { return is_bf16 || is_f16; }
 
+    // u3 non-dyn-quant with a scalar zero point: the zero point is folded out
+    // of the inner loop as sum((w - zp) * x) = sum(w * x) - zp * sum(x).
+    bool is_u3_zp_fold() const noexcept {
+        return dt_b == data_type::u3 && with_wei_decomp
+                && with_wei_decomp_zero_points
+                && wei_decomp_zero_points_stride == 0 && with_wei_decomp_scales
+                && !with_src_dyn_quant;
+    }
+
     bool is_f16_b_non_amx_vnni() const {
         return is_f16_b_non_amx_vnni(dt_b, brgattr.b_is_vnni, isa_impl);
     }

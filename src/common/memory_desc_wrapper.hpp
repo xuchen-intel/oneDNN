@@ -378,6 +378,16 @@ struct memory_desc_wrapper : public c_compatible {
                 const size_t alignment_in_bytes = 4;
                 data_size = utils::rnd_up(data_size, alignment_in_bytes);
             }
+            if (data_type() == data_type::u3 && bd.inner_nblks > 0) {
+                // The repacked (reordered) u3 weights-decompression kernel
+                // reads each 8-value group with a single 64-byte vpermb
+                // load that intentionally over-reads up to 16 bytes past
+                // the group's 48 valid bytes (harmless for every group
+                // except the very last one in the buffer, which has no
+                // following group to read into). Pad the buffer by one
+                // cache line so that over-read always stays in bounds.
+                data_size += 64;
+            }
             return data_size
                     + (include_additional_size ? additional_buffer_size() : 0)
                     + (include_offset0 ? data_type_size() * offset0() : 0);

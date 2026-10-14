@@ -212,22 +212,61 @@ void jit_brgemm_weights_decompression_kernel_t<isa>::load_weights(
 template <cpu_isa_t isa>
 void jit_brgemm_weights_decompression_kernel_t<isa>::load_weights_u3(
         Vmm vmm_load, const Xbyak::Address &addr, int ic) {
-    auto vmm_bit1 = vmm_tmp(2);
-    auto vmm_bit2 = vmm_tmp(3);
-    const int sh = 24 + ic;
-    uni_vpmovzxbd(vmm_load, addr);
-    uni_vpmovzxbd(vmm_bit1, ptr[addr.getRegExp() + vec_size]);
-    uni_vpmovzxbd(vmm_bit2, ptr[addr.getRegExp() + 2 * vec_size]);
-    uni_vpslld(vmm_load, vmm_load, sh);
-    uni_vpsrld(vmm_load, vmm_load, 31);
-    uni_vpslld(vmm_bit1, vmm_bit1, sh);
-    uni_vpsrld(vmm_bit1, vmm_bit1, 31);
-    uni_vpslld(vmm_bit1, vmm_bit1, 1);
-    uni_vpslld(vmm_bit2, vmm_bit2, sh);
-    uni_vpsrld(vmm_bit2, vmm_bit2, 31);
-    uni_vpslld(vmm_bit2, vmm_bit2, 2);
-    uni_vorps(vmm_load, vmm_load, vmm_bit1);
-    uni_vorps(vmm_load, vmm_load, vmm_bit2);
+    // Row r (vec_size bytes) holds byte r of each lane's Core-packed 8 values:
+    // value ic sits at bits [3 * ic, 3 * ic + 3) of row0 | row1 << 8 |
+    // row2 << 16. The callers visit ic = 0..7 of a block in order, so the
+    // 24-bit word is built once at ic % 8 == 0 and kept in vmm_word.
+    auto vmm_word = vmm_tmp(2);
+    auto vmm_mask = vmm_u3_mask();
+    const int idx = ic % 8;
+    const bool has_vbmi
+            = isa != avx2 && cpu().has(Xbyak::util::Cpu::tAVX512_VBMI);
+    if (has_vbmi) {
+        // One 64-byte load captures all 3 rows of this group (48 valid
+        // bytes, 16 over-read into the next group) in one shot; a single
+        // vpermb then gathers them into row0 | row1<<8 | row2<<16 per lane.
+        // idx_table is a fixed constant, loaded once in generate() and never
+        // modified by vpermb (only its "table" operand, aliased here to
+        // vmm_word itself, is overwritten).
+        if (idx == 0) {
+            uni_vmovups(vmm_word, addr);
+            vpermb(vmm_word, vmm_u3_idx_table(), vmm_word);
+        }
+        if (idx == 0) {
+            vpandd(vmm_load, vmm_word, vmm_mask);
+        } else {
+            uni_vpsrld(vmm_load, vmm_word, 3 * idx);
+            vpandd(vmm_load, vmm_load, vmm_mask);
+        }
+    } else {
+        auto vmm_row1 = vmm_tmp(3);
+        auto vmm_row2 = vmm_u3_row2();
+        if (idx == 0) {
+            uni_vpmovzxbd(vmm_word, addr);
+            uni_vpmovzxbd(vmm_row1, ptr[addr.getRegExp() + vec_size]);
+            uni_vpslld(vmm_row1, vmm_row1, 8);
+            uni_vpmovzxbd(vmm_row2, ptr[addr.getRegExp() + 2 * vec_size]);
+            uni_vpslld(vmm_row2, vmm_row2, 16);
+            // OR the 3 rows together in one 3-input logic op on AVX512
+            // instead of 2 sequential vorps.
+            if (isa == avx2) {
+                uni_vorps(vmm_word, vmm_word, vmm_row1);
+                uni_vorps(vmm_word, vmm_word, vmm_row2);
+            } else {
+                vpternlogd(vmm_word, vmm_row1, vmm_row2, 0xfe);
+            }
+        }
+        if (idx == 7) {
+            uni_vpsrld(vmm_load, vmm_word, 21);
+        } else {
+            if (idx > 0) uni_vpsrld(vmm_load, vmm_word, 3 * idx);
+            const auto &masked = idx > 0 ? vmm_load : vmm_word;
+            if (isa == avx2)
+                uni_vpand(vmm_load, masked, vmm_mask);
+            else
+                vpandd(vmm_load, masked, vmm_mask);
+        }
+    }
     uni_vcvtdq2ps(vmm_load, vmm_load);
 }
 
@@ -311,6 +350,24 @@ void jit_brgemm_weights_decompression_kernel_t<isa>::generate() {
             mov(reg_tmp, (size_t)lookup);
             uni_vmovups(vmm_lookup(), ptr[reg_tmp]);
         }
+    } else if (jcp_.weights_dt == data_type::u3) {
+        // Extraction mask for load_weights_u3: each lane's value is 3 bits.
+        static const int32_t mask7[16] = {7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+                7, 7, 7, 7};
+        mov(reg_tmp, (size_t)mask7);
+        uni_vmovups(vmm_u3_mask(), ptr[reg_tmp]);
+        if (isa != avx2 && cpu().has(Xbyak::util::Cpu::tAVX512_VBMI)) {
+            // vpermb index table: for output dword k (k = 0..15), byte0 = k
+            // (row0), byte1 = 16+k (row1), byte2 = 32+k (row2), byte3 = k
+            // (don't-care, masked away at extraction).
+            static const uint8_t idx_table[64] = {0, 16, 32, 0, 1, 17, 33, 1,
+                    2, 18, 34, 2, 3, 19, 35, 3, 4, 20, 36, 4, 5, 21, 37, 5, 6,
+                    22, 38, 6, 7, 23, 39, 7, 8, 24, 40, 8, 9, 25, 41, 9, 10,
+                    26, 42, 10, 11, 27, 43, 11, 12, 28, 44, 12, 13, 29, 45, 13,
+                    14, 30, 46, 14, 15, 31, 47, 15};
+            mov(reg_tmp, (size_t)idx_table);
+            uni_vmovups(vmm_u3_idx_table(), ptr[reg_tmp]);
+        }
     }
 
     if (jcp_.with_scales)
@@ -329,6 +386,14 @@ void jit_brgemm_weights_decompression_kernel_t<isa>::generate() {
                 jcp_.zero_points_dt);
 
     size_t oc_blocks_num = div_up(jcp_.oc_size, vec_size);
+
+    // (w - zp) * scale = w * scale - (zp * scale): fold the zero point and
+    // scale into one value per oc block up front, so the per-element apply
+    // below is a single FMA instead of a subtract followed by a multiply.
+    if (jcp_.with_zero_points && jcp_.with_scales)
+        for (size_t ocb = 0; ocb < oc_blocks_num; ocb++)
+            uni_vmulps(vmm_zero_points(ocb), vmm_zero_points(ocb),
+                    vmm_scales(ocb));
 
     Xbyak::Label ic_loop_label;
     Xbyak::Label ic_end_label;
@@ -373,9 +438,12 @@ void jit_brgemm_weights_decompression_kernel_t<isa>::generate() {
                     const auto load_addr = ptr[reg_weights + weights_offset];
                     load_weights(vmm_load, load_addr, ic);
 
-                    if (jcp_.with_zero_points)
+                    if (jcp_.with_zero_points && jcp_.with_scales)
+                        uni_vfmsub213ps(vmm_load, vmm_scales(ocb),
+                                vmm_zero_points(ocb));
+                    else if (jcp_.with_zero_points)
                         uni_vsubps(vmm_load, vmm_load, vmm_zero_points(ocb));
-                    if (jcp_.with_scales)
+                    else if (jcp_.with_scales)
                         uni_vmulps(vmm_load, vmm_load, vmm_scales(ocb));
                 }
 
@@ -415,10 +483,13 @@ void jit_brgemm_weights_decompression_kernel_t<isa>::generate() {
                     const auto weights_addr = ptr[reg_weights + weights_offset];
                     load_weights(vmm_weights(0), weights_addr, ic);
 
-                    if (jcp_.with_zero_points)
+                    if (jcp_.with_zero_points && jcp_.with_scales)
+                        uni_vfmsub213ps(vmm_weights(0), vmm_scales(ocb),
+                                vmm_zero_points(ocb));
+                    else if (jcp_.with_zero_points)
                         uni_vsubps(vmm_weights(0), vmm_weights(0),
                                 vmm_zero_points(ocb));
-                    if (jcp_.with_scales)
+                    else if (jcp_.with_scales)
                         uni_vmulps(vmm_weights(0), vmm_weights(0),
                                 vmm_scales(ocb));
 

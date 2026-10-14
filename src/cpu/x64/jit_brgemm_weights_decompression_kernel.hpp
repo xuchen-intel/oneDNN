@@ -116,6 +116,11 @@ private:
     Vmm vmm_mask7() { return vmm_tmp(3); }
     Vmm vmm_aux0() { return Vmm(14); }
     Vmm vmm_aux1() { return Vmm(15); }
+    Vmm vmm_u3_mask() { return vmm_tmp(0); }
+    Vmm vmm_u3_row2() { return vmm_tmp(1); }
+    // VBMI path only (mutually exclusive with vmm_u3_row2 above, same slot):
+    // the vpermb index table, preserved across calls.
+    Vmm vmm_u3_idx_table() { return vmm_tmp(1); }
 
     Xbyak::Reg64 reg_weights = r8;
     Xbyak::Reg64 reg_decomp_buffer = r9;

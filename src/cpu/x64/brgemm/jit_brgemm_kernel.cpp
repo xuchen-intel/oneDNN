@@ -342,8 +342,20 @@ private:
 
         if (brg.with_src_dyn_quant) { used_vregs += 1; }
 
+        // u3: dyn-quant decode uses 2 temps; non-dyn-quant keeps one packed
+        // 24-bit word per ld block (reused for 8 rd steps) plus the
+        // activation sum used to fold a scalar zero point. On AVX512 two
+        // more registers (a second row temp + an extraction mask) let the
+        // build/extract use vpternlogd/vpandd instead of sequential
+        // vorps/shift pairs; AVX2's register file is too tight for that
+        // (the bd_block==1 accm_tmp path already runs close to the edge
+        // there), so it keeps the single-temp sequential form.
         if (brg.dt_b == data_type::u3) {
-            used_vregs += 2;
+            const int non_dyn_quant_extra = brg.isa_impl == avx2 ? 1 : 3;
+            used_vregs += brg.with_src_dyn_quant
+                    ? 2
+                    : brg.ld_block2 + non_dyn_quant_extra
+                            + (brg.is_u3_zp_fold() ? 1 : 0);
         }
         return isa_num_vregs(brg.isa_impl) - used_vregs;
     }
@@ -3965,10 +3977,40 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel(dim_t bd_block2,
                         uni_vmovups(vmm_lookup, ptr[reg_ptr]);
                         vmm_zero_points = Vmm(isa_num_vregs(brg.isa_impl) - 2);
                     }
+                } else if (brg.dt_b == data_type::u3
+                        && !brg.with_src_dyn_quant && brg.isa_impl != avx2) {
+                    // Extraction mask for the u3 decode below: each lane's
+                    // value is 3 bits.
+                    static const int32_t mask7[16] = {7, 7, 7, 7, 7, 7, 7, 7,
+                            7, 7, 7, 7, 7, 7, 7, 7};
+                    mov(reg_ptr, (size_t)mask7);
+                    uni_vmovups(Vmm(max_effective_vregs + 2), ptr[reg_ptr]);
+                    if (cpu().has(Xbyak::util::Cpu::tAVX512_VBMI)) {
+                        // vpermb index table (reuses the row1 slot, unused
+                        // on the VBMI path): for output dword k (k = 0..15),
+                        // byte0 = k (row0), byte1 = 16+k (row1), byte2 =
+                        // 32+k (row2), byte3 = k (don't-care, masked away).
+                        static const uint8_t idx_table[64] = {0, 16, 32, 0, 1,
+                                17, 33, 1, 2, 18, 34, 2, 3, 19, 35, 3, 4, 20,
+                                36, 4, 5, 21, 37, 5, 6, 22, 38, 6, 7, 23, 39,
+                                7, 8, 24, 40, 8, 9, 25, 41, 9, 10, 26, 42, 10,
+                                11, 27, 43, 11, 12, 28, 44, 12, 13, 29, 45, 13,
+                                14, 30, 46, 14, 15, 31, 47, 15};
+                        mov(reg_ptr, (size_t)idx_table);
+                        uni_vmovups(
+                                Vmm(max_effective_vregs), ptr[reg_ptr]);
+                    }
                 }
 
                 reg_aux2_wei_dscales.restoreTo(reg_local_wei_scales);
                 reg_aux2_wei_zp.restoreTo(reg_local_wei_zp);
+
+                // u3 scalar zero point folded out of the inner loop: keep
+                // sum(x) over this rd block and subtract zp * sum(x) once.
+                const bool u3_zp_fold
+                        = brg.is_u3_zp_fold() && brg.bd_block == 1;
+                auto vmm_sumx = Vmm(max_effective_vregs
+                        + (brg.isa_impl == avx2 ? 1 : 3) + brg.ld_block2);
 
                 if (brg.with_wei_decomp_zero_points
                         && brg.wei_decomp_zero_points_stride == 0) {
@@ -4017,27 +4059,90 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel(dim_t bd_block2,
                             }
                             uni_vcvtdq2ps(vmm_load, vmm_load);
                         } else if (brg.dt_b == data_type::u3) {
+                            // Row r of a group holds byte r of each lane's
+                            // Core-packed 8 values: value idx sits at bits
+                            // [3 * idx, 3 * idx + 3) of row0 | row1 << 8 |
+                            // row2 << 16. Values 2 and 5 straddle two rows.
+                            // The 3 rows are loaded once per 8 rd steps and
+                            // merged into one 24-bit word per lane, kept in a
+                            // reserved register per ld block; every value is
+                            // then shifted out of it.
                             const int n_lanes = vreg_traits_t<Vmm>::vlen / 4;
-                            auto vmm_bit1 = Vmm(max_effective_vregs);
-                            auto vmm_bit2 = Vmm(max_effective_vregs + 1);
                             const int idx = rd % 8;
-                            const int sh = 24 + idx;
-                            uni_vpmovzxbd(vmm_load, addr);
-                            uni_vpmovzxbd(vmm_bit1,
-                                    ptr[reg_aux_B + B_offset(ld, rd) + n_lanes]);
-                            uni_vpmovzxbd(vmm_bit2,
-                                    ptr[reg_aux_B + B_offset(ld, rd)
-                                            + 2 * n_lanes]);
-                            uni_vpslld(vmm_load, vmm_load, sh);
-                            uni_vpsrld(vmm_load, vmm_load, 31);
-                            uni_vpslld(vmm_bit1, vmm_bit1, sh);
-                            uni_vpsrld(vmm_bit1, vmm_bit1, 31);
-                            uni_vpslld(vmm_bit1, vmm_bit1, 1);
-                            uni_vpslld(vmm_bit2, vmm_bit2, sh);
-                            uni_vpsrld(vmm_bit2, vmm_bit2, 31);
-                            uni_vpslld(vmm_bit2, vmm_bit2, 2);
-                            uni_vorps(vmm_load, vmm_load, vmm_bit1);
-                            uni_vorps(vmm_load, vmm_load, vmm_bit2);
+                            const auto row_addr = [&](int r) {
+                                return ptr[reg_aux_B + B_offset(ld, rd)
+                                        + r * n_lanes];
+                            };
+                            if (brg.isa_impl == avx2) {
+                                // AVX2's register file is too tight to also
+                                // afford a second row temp + mask register
+                                // here (see get_max_effective_vregs), so this
+                                // keeps the single-temp sequential build and
+                                // the shift-pair extraction.
+                                auto vmm_tmp = Vmm(max_effective_vregs);
+                                auto vmm_word = Vmm(max_effective_vregs + 1 + ld);
+                                if (idx == 0) {
+                                    uni_vpmovzxbd(vmm_word, row_addr(0));
+                                    for (int r = 1; r < 3; r++) {
+                                        uni_vpmovzxbd(vmm_tmp, row_addr(r));
+                                        uni_vpslld(vmm_tmp, vmm_tmp, 8 * r);
+                                        uni_vorps(vmm_word, vmm_word, vmm_tmp);
+                                    }
+                                }
+                                if (idx == 7) {
+                                    uni_vpsrld(vmm_load, vmm_word, 21);
+                                } else {
+                                    uni_vpslld(vmm_load, vmm_word, 29 - 3 * idx);
+                                    uni_vpsrld(vmm_load, vmm_load, 29);
+                                }
+                            } else if (cpu().has(
+                                               Xbyak::util::Cpu::tAVX512_VBMI)) {
+                                // One 64-byte load captures all 3 rows of
+                                // this group (48 valid, 16 over-read into
+                                // the next group) in one shot; a single
+                                // vpermb gathers them into
+                                // row0 | row1<<8 | row2<<16 per lane.
+                                // vmm_idx_table is a fixed constant, set up
+                                // once above and never modified by vpermb.
+                                auto vmm_idx_table = Vmm(max_effective_vregs);
+                                auto vmm_mask = Vmm(max_effective_vregs + 2);
+                                auto vmm_word
+                                        = Vmm(max_effective_vregs + 3 + ld);
+                                if (idx == 0) {
+                                    uni_vmovups(vmm_word, row_addr(0));
+                                    vpermb(vmm_word, vmm_idx_table, vmm_word);
+                                }
+                                if (idx == 0) {
+                                    vpandd(vmm_load, vmm_word, vmm_mask);
+                                } else {
+                                    uni_vpsrld(vmm_load, vmm_word, 3 * idx);
+                                    vpandd(vmm_load, vmm_load, vmm_mask);
+                                }
+                            } else {
+                                auto vmm_row1 = Vmm(max_effective_vregs);
+                                auto vmm_row2 = Vmm(max_effective_vregs + 1);
+                                auto vmm_mask = Vmm(max_effective_vregs + 2);
+                                auto vmm_word
+                                        = Vmm(max_effective_vregs + 3 + ld);
+                                if (idx == 0) {
+                                    uni_vpmovzxbd(vmm_word, row_addr(0));
+                                    uni_vpmovzxbd(vmm_row1, row_addr(1));
+                                    uni_vpslld(vmm_row1, vmm_row1, 8);
+                                    uni_vpmovzxbd(vmm_row2, row_addr(2));
+                                    uni_vpslld(vmm_row2, vmm_row2, 16);
+                                    vpternlogd(
+                                            vmm_word, vmm_row1, vmm_row2, 0xfe);
+                                }
+                                if (idx == 7) {
+                                    uni_vpsrld(vmm_load, vmm_word, 21);
+                                } else {
+                                    if (idx > 0)
+                                        uni_vpsrld(vmm_load, vmm_word, 3 * idx);
+                                    const auto &masked
+                                            = idx > 0 ? vmm_load : vmm_word;
+                                    vpandd(vmm_load, masked, vmm_mask);
+                                }
+                            }
                             uni_vcvtdq2ps(vmm_load, vmm_load);
                         } else if (brg.dt_b == data_type::nf4) {
                             uni_vpmovzxbd(vmm_load, addr);
@@ -4087,7 +4192,7 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel(dim_t bd_block2,
                             assert(!"unsupported combination");
                         }
 
-                        if (brg.with_wei_decomp_zero_points) {
+                        if (brg.with_wei_decomp_zero_points && !u3_zp_fold) {
                             if (brg.wei_decomp_zero_points_stride == 0) {
                                 uni_vsubps(vmm_load, vmm_load, vmm_zero_points);
                             } else {
@@ -4125,6 +4230,21 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel(dim_t bd_block2,
                                 broadcast_A(bcst(bd), bd, rd);
                             }
                         }
+                        if (u3_zp_fold) {
+                            const auto a_addr = ptr[reg_aux_A + A_offset(bd, rd)];
+                            if (rd == 0) {
+                                if (is_emdbd)
+                                    uni_vbroadcastss(vmm_sumx, a_addr);
+                                else
+                                    uni_vmovups(vmm_sumx, bcst());
+                            } else {
+                                if (is_emdbd)
+                                    uni_vaddps(vmm_sumx, vmm_sumx,
+                                            ptr_b[reg_aux_A + A_offset(bd, rd)]);
+                                else
+                                    uni_vaddps(vmm_sumx, vmm_sumx, bcst());
+                            }
+                        }
                         if (prefetch_count_B < ld_block2) {
                             prefetcht0(ptr[reg_aux_B
                                     + B_offset(prefetch_count_B++, rd)
@@ -4157,6 +4277,9 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel(dim_t bd_block2,
                     for (int ld = 0; ld < ld_block2; ld++) {
                         auto vmm_accm_tmp = accm_tmp(ld_block2, 0, ld);
                         auto vmm_accm = accm(ld_block2, 0, ld);
+                        if (u3_zp_fold)
+                            uni_vfnmadd231ps(
+                                    vmm_accm_tmp, vmm_zero_points, vmm_sumx);
                         if (brg.wei_decomp_scales_stride == 0) {
                             load_scales(bcst(), ptr[reg_local_wei_scales]);
                         } else {
