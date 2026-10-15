@@ -2498,14 +2498,21 @@ void repack_block(const memory_desc_wrapper &output_d, uint8_t *dst,
         for (int ic_local = 0; ic_local < ic_block; ic_local++) {
             const uint8_t val = get_val(oc_local, ic_local);
             if (dyn_quant) {
+                // Byte lane (oc_local % 8) * 4 + ic_local % 4 holds its own
+                // Core-packed group of 8 values spanning this 32-wide IC
+                // group's idx = 0..7 (one idx per 4 consecutive ic_local):
+                // value idx sits at bits [3 * idx, 3 * idx + 3) of
+                // row0 | row1 << 8 | row2 << 16, same convention as the
+                // non-dyn-quant layout, just keyed on idx instead of ic_local
+                // % 8 directly.
                 const size_t group = (size_t)(ic_local / 32) * (blksize_o / 8)
                         + oc_local / 8;
-                const size_t byte0
-                        = group * 96 + (oc_local % 8) * 4 + ic_local % 4;
-                const int bit_pos = 7 - (ic_local % 32) / 4;
+                const size_t lane = (oc_local % 8) * 4 + ic_local % 4;
+                const size_t byte0 = group * 96 + lane;
+                const int idx = (ic_local % 32) / 4;
+                const uint32_t bits = (uint32_t)(val & 0x7u) << (3 * idx);
                 for (int r = 0; r < 3; r++)
-                    dst[byte0 + r * 32] |= static_cast<uint8_t>(
-                            ((val >> r) & 1u) << bit_pos);
+                    dst[byte0 + r * 32] |= static_cast<uint8_t>(bits >> (8 * r));
             } else {
                 // Each lane (OC) holds the 3 bytes of its Core-packed group of
                 // 8 IC, one byte per row: value i sits at bits [3i, 3i + 3) of

@@ -295,7 +295,9 @@ int calculate_max_bcast_block(brgemm_desc_t *brg, const int adj_ld_block2) {
     if (brg->dt_b == data_type::u3) {
         const int non_dyn_quant_extra = brg->isa_impl == avx2 ? 1 : 3;
         microkernel_max_reg_count -= brg->with_src_dyn_quant
-                ? 2
+                ? (is_superset(brg->isa_impl, avx512_core)
+                                ? 3 * adj_ld_block2 + 1
+                                : 2)
                 : adj_ld_block2 + non_dyn_quant_extra
                         + (brg->is_u3_zp_fold() ? 1 : 0);
     }

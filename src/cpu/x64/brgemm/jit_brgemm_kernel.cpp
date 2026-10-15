@@ -342,7 +342,10 @@ private:
 
         if (brg.with_src_dyn_quant) { used_vregs += 1; }
 
-        // u3: dyn-quant decode uses 2 temps; non-dyn-quant keeps one packed
+        // u3: dyn-quant decode keeps the 3 raw bit-planes of the current
+        // 32-rd group in a persistent register per ld block (reused for 8
+        // rd steps instead of reloaded every step) plus one transient
+        // scratch for the shift/mask/combine; non-dyn-quant keeps one packed
         // 24-bit word per ld block (reused for 8 rd steps) plus the
         // activation sum used to fold a scalar zero point. On AVX512 two
         // more registers (a second row temp + an extraction mask) let the
@@ -353,7 +356,9 @@ private:
         if (brg.dt_b == data_type::u3) {
             const int non_dyn_quant_extra = brg.isa_impl == avx2 ? 1 : 3;
             used_vregs += brg.with_src_dyn_quant
-                    ? 2
+                    ? (is_superset(brg.isa_impl, avx512_core)
+                                    ? 3 * brg.ld_block2 + 1
+                                    : 2)
                     : brg.ld_block2 + non_dyn_quant_extra
                             + (brg.is_u3_zp_fold() ? 1 : 0);
         }
@@ -3402,13 +3407,20 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel_dyn_quant(dim_t bd_block2,
             0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03,
             0x03, 0x03, 0x03, 0x03};
 
-    static const int8_t mask_low_1_bit[64] = {0x01, 0x01, 0x01, 0x01, 0x01,
-            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
-            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
-            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
-            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
-            0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
-            0x01, 0x01, 0x01, 0x01};
+    // u3 byte masks, 64 bytes each: 0x07 (value), 0x03 / 0x01 (low part of
+    // the straddling values 2 / 5), 0x04 / 0x06 (their high part, already
+    // shifted into place).
+    static const struct u3_masks_t {
+        uint8_t m[5][64];
+        u3_masks_t() {
+            const uint8_t v[5] = {0x07, 0x03, 0x01, 0x04, 0x06};
+            for (int i = 0; i < 5; i++)
+                for (int j = 0; j < 64; j++)
+                    m[i][j] = v[i];
+        }
+    } u3_masks;
+    constexpr int u3_mask_03 = 64, u3_mask_01 = 128, u3_mask_04 = 192,
+                  u3_mask_06 = 256;
 
     reg_bdb_loop.save();
     reg_ldb_loop.save();
@@ -3423,7 +3435,9 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel_dyn_quant(dim_t bd_block2,
         mov(reg_ptr, (size_t)mask_low_2_bits);
         uni_vmovups(vmm_mask_low, ptr[reg_ptr]);
     } else if (brg.dt_b == data_type::u3) {
-        mov(reg_ptr, (size_t)mask_low_1_bit);
+        // reg_ptr keeps pointing at the table: the decode below reads the
+        // other masks from it as memory operands.
+        mov(reg_ptr, (size_t)u3_masks.m);
         uni_vmovups(vmm_mask_low, ptr[reg_ptr]);
     }
 
@@ -3457,36 +3471,87 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel_dyn_quant(dim_t bd_block2,
                 uni_vpsrld(vmm_load, vmm_load, 6 - 2 * idx);
                 uni_vandps(vmm_load, vmm_load, vmm_mask_low);
             } else if (brg.dt_b == data_type::u3) {
-                auto vmm_bit1 = Vmm(isa_num_vregs(brg.isa_impl) - 2);
-                auto vmm_bit2 = Vmm(isa_num_vregs(brg.isa_impl) - 3);
+                // The reorder writes groups of 32 rd (IC) x 8 OC as 3 rows
+                // of 32 bytes. Byte lane (oc_local % 8) * 4 + ic_local % 4
+                // of row r is byte r of that lane's Core-packed 8 values:
+                // value idx = (rd % 32) / 4 sits at bits [3 * idx,
+                // 3 * idx + 3) of row0 | row1 << 8 | row2 << 16. A dword
+                // shift drags bits in from the neighbouring byte lane, but
+                // only above the extracted field, so a byte mask removes
+                // them; only values 2 and 5 straddle two rows.
+                // All 8 rd steps of a group read the same 3 rows (B_offset
+                // only changes every 32 rd): on AVX512 they're loaded once
+                // per group into registers reserved per ld block; AVX2's
+                // register file is too tight for that, so it reads each
+                // needed row straight from memory.
                 const int idx = (rd % 32) / 4;
-                const int sh = 7 - idx;
                 constexpr int grp_plane_bytes = 32;
                 constexpr int grp_bytes = 3 * grp_plane_bytes;
-                auto load_plane = [&](const Vmm &vmm, int r) {
-                    const auto off = B_offset(ld, rd) + r * grp_plane_bytes;
-                    if (vec_size == 2 * grp_plane_bytes) {
-                        const auto idx = vmm.getIdx();
-                        vmovdqu32(Xbyak::Ymm(idx), ptr[reg_aux_B + off]);
-                        vinserti64x4(Xbyak::Zmm(idx), Xbyak::Zmm(idx),
-                                ptr[reg_aux_B + off + grp_bytes], 1);
-                    } else {
-                        uni_vmovups(vmm, ptr[reg_aux_B + off]);
-                    }
+                const bool is_zmm = vec_size == 2 * grp_plane_bytes;
+                auto raw_plane = [&](int r) {
+                    return Vmm(max_effective_vregs + r * ld_block2 + ld);
                 };
-                load_plane(vmm_load, 0);
-                load_plane(vmm_bit1, 1);
-                load_plane(vmm_bit2, 2);
-                uni_vpsrld(vmm_load, vmm_load, sh);
-                uni_vandps(vmm_load, vmm_load, vmm_mask_low);
-                uni_vpsrld(vmm_bit1, vmm_bit1, sh);
-                uni_vandps(vmm_bit1, vmm_bit1, vmm_mask_low);
-                uni_vpslld(vmm_bit1, vmm_bit1, 1);
-                uni_vpsrld(vmm_bit2, vmm_bit2, sh);
-                uni_vandps(vmm_bit2, vmm_bit2, vmm_mask_low);
-                uni_vpslld(vmm_bit2, vmm_bit2, 2);
-                uni_vorps(vmm_load, vmm_load, vmm_bit1);
-                uni_vorps(vmm_load, vmm_load, vmm_bit2);
+                auto plane_addr = [&](int r) {
+                    return ptr[reg_aux_B + B_offset(ld, rd)
+                            + r * grp_plane_bytes];
+                };
+                auto vmm_tmp = is_zmm
+                        ? Vmm(max_effective_vregs + 3 * ld_block2)
+                        : Vmm(isa_num_vregs(brg.isa_impl) - 2);
+                if (is_zmm && idx == 0) {
+                    // One zmm row = the same row of 2 adjacent 8-OC groups.
+                    for (int r = 0; r < 3; r++) {
+                        const auto vidx = raw_plane(r).getIdx();
+                        const auto off
+                                = B_offset(ld, rd) + r * grp_plane_bytes;
+                        vmovdqu32(Xbyak::Ymm(vidx), ptr[reg_aux_B + off]);
+                        vinserti64x4(Xbyak::Zmm(vidx), Xbyak::Zmm(vidx),
+                                ptr[reg_aux_B + off + grp_bytes], 1);
+                    }
+                }
+                auto srl = [&](const Vmm &dst, int r, int sh) {
+                    if (is_zmm)
+                        uni_vpsrld(dst, raw_plane(r), sh);
+                    else
+                        uni_vpsrld(dst, plane_addr(r), sh);
+                };
+                auto sll = [&](const Vmm &dst, int r, int sh) {
+                    if (is_zmm)
+                        uni_vpslld(dst, raw_plane(r), sh);
+                    else
+                        uni_vpslld(dst, plane_addr(r), sh);
+                };
+                const int bit = 3 * idx, row = bit / 8, off = bit % 8;
+                if (off + 3 <= 8) {
+                    if (off == 0) {
+                        if (is_zmm)
+                            uni_vandps(vmm_load, raw_plane(row), vmm_mask_low);
+                        else
+                            uni_vandps(vmm_load, vmm_mask_low, plane_addr(row));
+                    } else {
+                        srl(vmm_load, row, off);
+                        uni_vandps(vmm_load, vmm_load, vmm_mask_low);
+                    }
+                } else {
+                    // Value 2: bits 6-7 of row 0 + bit 0 of row 1; value 5:
+                    // bit 7 of row 1 + bits 0-1 of row 2.
+                    const int n_lo = 8 - off;
+                    const auto lo_mask
+                            = ptr[reg_ptr + (n_lo == 2 ? u3_mask_03 : u3_mask_01)];
+                    srl(vmm_load, row, off);
+                    sll(vmm_tmp, row + 1, n_lo);
+                    if (is_zmm) {
+                        // lo_mask ? vmm_load : vmm_tmp, then keep 3 bits.
+                        vpternlogd(vmm_load, vmm_tmp, lo_mask, 0xe4);
+                        uni_vandps(vmm_load, vmm_load, vmm_mask_low);
+                    } else {
+                        const auto hi_mask = ptr[reg_ptr
+                                + (n_lo == 2 ? u3_mask_04 : u3_mask_06)];
+                        uni_vandps(vmm_load, vmm_load, lo_mask);
+                        uni_vandps(vmm_tmp, vmm_tmp, hi_mask);
+                        uni_vorps(vmm_load, vmm_load, vmm_tmp);
+                    }
+                }
             } else {
                 assert(!"unsupported combination");
             }
