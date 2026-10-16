@@ -3512,14 +3512,20 @@ void jit_brgemm_kernel_t<Wmm>::gemm_microkernel_dyn_quant(dim_t bd_block2,
                 auto srl = [&](const Vmm &dst, int r, int sh) {
                     if (is_zmm)
                         uni_vpsrld(dst, raw_plane(r), sh);
-                    else
-                        uni_vpsrld(dst, plane_addr(r), sh);
+                    else {
+                        // VEX has no memory-source immediate shift (it would
+                        // be silently EVEX-encoded, i.e. AVX512VL-only).
+                        uni_vmovups(dst, plane_addr(r));
+                        uni_vpsrld(dst, dst, sh);
+                    }
                 };
                 auto sll = [&](const Vmm &dst, int r, int sh) {
                     if (is_zmm)
                         uni_vpslld(dst, raw_plane(r), sh);
-                    else
-                        uni_vpslld(dst, plane_addr(r), sh);
+                    else {
+                        uni_vmovups(dst, plane_addr(r));
+                        uni_vpslld(dst, dst, sh);
+                    }
                 };
                 const int bit = 3 * idx, row = bit / 8, off = bit % 8;
                 if (off + 3 <= 8) {
